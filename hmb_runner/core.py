@@ -15,6 +15,8 @@ RESULTS_DIR = ROOT / "results"
 WORKSPACES_DIR = ROOT / "workspaces"
 JOURNAL = RESULTS_DIR / "journal.jsonl"
 EXTENSION_ID = "anthropic.claude-code"
+WS_TS_FORMAT = "%Y%m%dT%H%M%S"  # в имени workspace: без двоеточий, сортируется как время
+WS_NAME_RE = re.compile(r"^(\d{8}T\d{6})-(.+)$")
 
 
 def die(msg, code=1):
@@ -61,6 +63,7 @@ def _run(cmdline, timeout=20):
     return (r.stdout or "").strip().splitlines()
 
 
+
 def snapshot_versions():
     """Снимок версий: расширение / VSCode / CLI / python."""
     ext_ver = None
@@ -87,12 +90,36 @@ def _fresh_workspace(ws, task_dir):
         ws.mkdir(parents=True)
 
 
+def workspace_dir(task_id):
+    """Каталог нового прогона: workspaces/<таймстемп>-<task-id> (локальное время, до секунды)."""
+    return WORKSPACES_DIR / f"{datetime.now().strftime(WS_TS_FORMAT)}-{task_id}"
+
+
+def latest_workspace(task_id):
+    """Самый свежий workspace задачи по таймстемпу в имени; None, если нет.
+
+    Понимает и старое имя без таймстемпа (workspaces/<task-id>), считая его самым старым.
+    """
+    if not WORKSPACES_DIR.exists():
+        return None
+    candidates = []
+    for p in WORKSPACES_DIR.iterdir():
+        if not p.is_dir():
+            continue
+        m = WS_NAME_RE.match(p.name)
+        if m and m.group(2) == task_id:
+            candidates.append((m.group(1), p))
+        elif p.name == task_id:  # старое имя без таймстемпа
+            candidates.append(("", p))
+    return max(candidates)[1] if candidates else None
+
+
 def start_task(task_id, force=False):
     task_dir, cfg = find_task(task_id)
-    ws = WORKSPACES_DIR / task_id
+    ws = workspace_dir(task_id)
     if ws.exists() and not force:
         die(f"workspace уже существует: {ws}\n"
-            "  (прогон уже начат? тогда `verify`; для чистого прогона заново — `start --force`)")
+            "  (два старта в одну секунду? для пересоздания — `start --force`)")
     _fresh_workspace(ws, task_dir)
     versions = snapshot_versions()
     meta = {"task_id": task_id, "started_utc": now_utc(),
@@ -156,10 +183,15 @@ def run_verifier(task_dir, cfg, ws, timeout_sec=180):
 
 def verify_task(task_id, workspace=None, notes=None, model=None, record=True):
     task_dir, cfg = find_task(task_id)
-    ws = Path(workspace).resolve() if workspace else WORKSPACES_DIR / task_id
-    if not ws.exists():
-        die(f"workspace не найден: {ws} (сначала `python -m hmb_runner start {task_id}`)")
-
+    if workspace:
+        ws = Path(workspace).resolve()
+        if not ws.exists():
+            die(f"workspace не найден: {ws}")
+    else:
+        ws = latest_workspace(task_id)
+        if ws is None:
+            die(f"workspace задачи {task_id} не найден (workspaces/<таймстемп>-{task_id}); "
+                f"сначала `python -m hmb_runner start {task_id}`")
     started = None
     versions = None
     meta_path = ws / ".hmb-run.json"
@@ -170,7 +202,6 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True):
     if model:
         versions = dict(versions or snapshot_versions())
         versions["model"] = model
-
     duration = None
     if started:
         duration = round((datetime.now(timezone.utc)
@@ -209,7 +240,10 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True):
 
 
 def sanity_task(task_id):
-    """Санити задачи: эталонное решение обязано набрать score = 1.0."""
+    """Санити задачи: эталонное решение обязано набрать score = 1.0.
+
+    workspaces/_sanity/<task-id> — служебная папка, без таймстемпа в имени.
+    """
     task_dir, cfg = find_task(task_id)
     sol = task_dir / "solution"
     if not sol.exists():

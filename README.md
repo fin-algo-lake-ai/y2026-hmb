@@ -13,14 +13,17 @@ HMB — Harness–Model Benchmark
 ```
 python -m hmb_runner list                  # список задач
 python -m hmb_runner sanity --all          # verifier'ы обязаны проходить эталонные решения
-python -m hmb_runner start <task-id>       # развернёт workspaces/<task-id>, снимет версии,
-                                           # напечатает промпт для панели Claude Code
+python -m hmb_runner start <task-id>       # развернёт workspaces/<таймстемп>-<task-id>,
+                                           # снимет версии, напечатает промпт для панели
 # ... открыть workspace в VSCode, вставить промпт в панель Claude Code, дождаться завершения ...
-python -m hmb_runner verify <task-id>      # проверит workspace и допишет результат
-                                           # в results/journal.jsonl
+python -m hmb_runner verify <task-id>      # проверит свежайший workspace задачи и допишет
+                                           # результат в results/journal.jsonl
 ```
 
-Полезные флаги: `start --force` (пересоздать workspace), `verify --workspace <dir>`,
+Каждый `start` создаёт отдельный воркспейс `workspaces/<ГГГГММДДТЧЧММСС>-<task-id>`
+(локальное время, точность до секунды), так что повторные прогоны не затирают друг друга.
+`verify` без `--workspace` берёт самый свежий воркспейс задачи.
+Полезные флаги: `verify --workspace <dir>`,
 `verify --notes "..." --model <model>` (метаданные прогона), `verify --no-record`
 (проверить без записи). Снимок версий расширения/VSCode/CLI делается автоматически
 в `start` и попадает в запись журнала.
