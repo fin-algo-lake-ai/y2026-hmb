@@ -1,0 +1,24 @@
+id: xls-001-sales-pivot
+category: excel
+difficulty: medium
+time_limit_min: 20
+tags: [xlsx, aggregation]
+verify:
+  cmd: python verify/check_summary.py
+  scoring: checks
+prompt: |
+  Работай в текущей папке (workspace).
+
+  В workbook data/orders.xlsx на листе "Orders" — таблица заказов с колонками
+  date, region, product, units, unit_price.
+
+  Добавь в этот же workbook лист "Summary" со сводкой по регионам:
+    - A1:C1 — заголовки: region, units, revenue
+    - ниже — по одной строке на регион, регионы отсортированы по алфавиту;
+      units — суммарное число единиц по региону;
+      revenue — сумма units*unit_price по региону, округлённая до 2 знаков
+    - итоговых строк не добавлять, лишних строк и колонок не оставлять
+
+  Значения записывай вычисленными числами, а не формулами:
+  verifier в v0 не пересчитывает формулы.
+  Лист "Orders" должен остаться без изменений.

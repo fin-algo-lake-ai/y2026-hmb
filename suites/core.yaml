@@ -1,0 +1,6 @@
+name: core
+description: v0 smoke — по одной задаче на категорию
+tasks:
+  - code-001-json-flatten
+  - term-001-log-report
+  - xls-001-sales-pivot

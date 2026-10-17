@@ -1,0 +1,24 @@
+id: term-001-log-report
+category: terminal
+difficulty: medium
+time_limit_min: 20
+tags: [logs, aggregation]
+verify:
+  cmd: python verify/check_report.py
+  scoring: checks
+prompt: |
+  Работай в текущей папке (workspace).
+
+  В файле data/access.log лежит журнал веб-сервера в формате Common Log Format:
+
+      203.0.113.7 - - [10/Oct/2026:08:00:11 +0300] "GET /page HTTP/1.1" 200 512
+
+  (последние два числа в строке — статус и размер ответа).
+
+  Найди 5 IP-адресов, с которых пришло больше всего ответов со статусом 5xx,
+  и запиши их в файл report.txt в корне workspace:
+    - ровно 5 строк, по одной на IP;
+    - формат строки: "<ip> <count>" (один пробел);
+    - сортировка: count по убыванию, при равенстве — ip по возрастанию (как строки).
+
+  Инструменты — любые (grep/awk/python и т.п.). Содержимое data/access.log не изменять.

@@ -1,0 +1,17 @@
+id: code-001-json-flatten
+category: code
+difficulty: easy
+time_limit_min: 15
+tags: [python, spec]
+verify:
+  cmd: python verify/check_flatten.py
+  scoring: checks
+prompt: |
+  Работай в текущей папке (workspace).
+
+  Реализуй функцию `flatten_json(obj)` в файле `src/flatten.py`.
+  Требования заданы в докстринге модуля — они определяют формат результата:
+  склейка ключей вложенных словарей, запись индексов списков, обращение с
+  пустыми контейнерами, корень-список, неизменяемость входа.
+
+  Сигнатуру менять нельзя, сторонние зависимости использовать нельзя.
