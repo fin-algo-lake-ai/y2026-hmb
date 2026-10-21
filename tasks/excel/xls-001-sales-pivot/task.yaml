@@ -6,6 +6,9 @@ tags: [xlsx, aggregation]
 verify:
   cmd: python verify/check_summary.py
   scoring: checks
+idea: >
+  Средняя задача по Excel (сделать лист со сводкой по данным). Сочинена GLM.
+  Ожидаем не формулы а числа (явно прописано в задании).
 prompt: |
   Работай в текущей папке (workspace).
 

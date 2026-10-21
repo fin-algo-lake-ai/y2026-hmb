@@ -6,6 +6,10 @@ tags: [python, spec]
 verify:
   cmd: python verify/check_flatten.py
   scoring: checks
+idea: >
+  Простая задача по программированию, сочинена GLM.
+  Немного запутанная (приходится смотреть на примеры).
+  Без мутации входа и без внешних зависимостей.
 prompt: |
   Работай в текущей папке (workspace).
 

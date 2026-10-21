@@ -6,6 +6,10 @@ tags: [logs, aggregation]
 verify:
   cmd: python verify/check_report.py
   scoring: checks
+idea: >
+  Распарсить Common Log Format журнал access.log, посчитать по каждому IP число
+  ответов со статусом 5xx и записать топ-5 IP в report.txt в формате
+  "<ip> <count>" (count по убыванию, при равенстве — ip по возрастанию).
 prompt: |
   Работай в текущей папке (workspace).
 
