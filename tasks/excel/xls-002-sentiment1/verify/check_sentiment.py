@@ -5,7 +5,12 @@ feedback берётся из фиксированного лексикона LEX
 ground truth, не зависит от генератора). Сверяется колонка G "sentiment"
 листа Orders и лист "Summary" в workspace. Печатает по строке на проверку
 и в конце "SCORE: <доля пройденных>". Код выхода 0 — verifier отработал.
+
+Каждый несовпадающий кейс sentiment_values дописывается одной jsonl-строкой
+в файл из $HMB_DETAILS (исходные колонки кейса, ответ системы, эталон) —
+они попадают в лист «Кейсы» excel-отчёта runner'а, на экран не выводятся.
 """
+import json
 import os
 from collections import Counter
 from pathlib import Path
@@ -15,6 +20,14 @@ from openpyxl import load_workbook
 WS = Path(os.environ["HMB_WORKSPACE"])
 WB = WS / "data" / "orders.xlsx"
 PRISTINE = Path(__file__).resolve().parents[1] / "env" / "data" / "orders.xlsx"
+DETAILS = os.environ.get("HMB_DETAILS")
+
+
+def emit_detail(obj):
+    """Дописывает кейс в $HMB_DETAILS, если runner его запросил."""
+    if DETAILS:
+        with open(DETAILS, "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 CLASSES = ("positive", "negative", "neutral")
 LEXICON = {
@@ -101,6 +114,11 @@ def main():
                 formulas += 1
             elif not (isinstance(v, str) and v.strip().casefold() == exp):
                 bad.append((r, v, exp))
+                src = base[r - 1]  # date, region, product, units, unit_price, feedback
+                emit_detail({"check": "sentiment_values", "row": r,
+                             "date": src[0], "region": src[1], "product": src[2],
+                             "feedback": src[5],
+                             "got": v, "expected": exp})
         hint = ""
         if formulas:
             hint = f"{formulas} ячеек — формулы без кэша значений; " \

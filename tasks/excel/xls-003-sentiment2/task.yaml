@@ -1,26 +1,32 @@
-id: xls-002-sentiment2
+id: xls-003-sentiment2
 category: excel
 difficulty: medium
 time_limit_min: 20
 tags: [xlsx, aggregation]
 verify:
-  cmd: python verify/check_summary.py
+  cmd: python verify/check_sentiment.py
   scoring: checks
 idea: >
-  То же, что и xls-002-sentiment1, только тут 1000 строк.
+  То же, что и xls-002-sentiment1, только тут 1000 строк
+  (проверяем масштабируемость и расход токенов).
 prompt: |
   Работай в текущей папке (workspace).
 
   В workbook data/orders.xlsx на листе "Orders" — таблица заказов с колонками
-  date, region, product, units, unit_price.
+  date, region, product, units, unit_price и колонкой F feedback — текстовый
+  отзыв покупателя на английском.
 
-  Добавь в этот же workbook лист "Summary" со сводкой по регионам:
-    - A1:C1 — заголовки: region, units, revenue
-    - ниже — по одной строке на регион, регионы отсортированы по алфавиту;
-      units — суммарное число единиц по региону;
-      revenue — сумма units*unit_price по региону, округлённая до 2 знаков
-    - итоговых строк не добавлять, лишних строк и колонок не оставлять
+  Оцени тональность каждого отзыва и:
+    1. В листе "Orders" добавь колонку G с заголовком "sentiment" в G1; ниже —
+       для каждой строки заказа значение: positive, negative или neutral
+       (строчными, ровно одно из трёх).
+    2. Добавь лист "Summary" со сводкой по классам:
+       - A1:B1 — заголовки: sentiment, count
+       - ниже — три строки: positive, negative, neutral (в этом порядке) и
+         число отзывов соответствующего класса
+       - итоговых строк не добавлять, лишних строк и колонок не оставлять
 
-  Значения записывай вычисленными числами, а не формулами:
+  Исходные колонки A:F листа Orders (включая feedback) должны остаться
+  без изменений.
+  Значения записывай вычисленными, а не формулами:
   verifier в v0 не пересчитывает формулы.
-  Лист "Orders" должен остаться без изменений.

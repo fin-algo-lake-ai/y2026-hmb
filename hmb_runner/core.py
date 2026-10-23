@@ -140,12 +140,41 @@ def start_task(task_id, force=False):
     print("-" * 70)
     sys.stdout.write(prompt)
     print("-" * 70)
+    print()
+    print(f"проверка после завершения: python -m hmb_runner verify {task_id}")
+
+
+CHECK_RE = re.compile(r"^(ok|FAIL)\s+(\S+)(?:\s+\((.*)\))?\s*$", re.M)
+
+
+def _read_details(ws):
+    """Читает детальные кейсы, дописанные verifier'ом в $HMB_DETAILS (jsonl).
+
+    Возвращает список dict'ов (по одному на строку); мусорные строки игнорируются.
+    """
+    path = ws / ".hmb-details.jsonl"
+    details = []
+    if path.exists():
+        for ln in path.read_text(encoding="utf-8").splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                obj = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                details.append(obj)
+        path.unlink()
+    return details
 
 
 def run_verifier(task_dir, cfg, ws, timeout_sec=180):
     """Запускает verifier задачи.
 
-    Возвращает (score, passed, хвост вывода, verifier_suspect).
+    Возвращает (score, passed, хвост вывода, verifier_suspect, checks, details),
+    checks — список (ok, имя_проверки, пояснение) из строк "ok/FAIL <имя> (<пояснение>)",
+    details — детальные кейсы из $HMB_DETAILS (см. _read_details).
     Контракт verifier'а: печатает строку "SCORE: <доля 0..1>", код выхода 0,
     если verifier сам отработал (даже при score=0); ненулевой код — verifier сломан.
     """
@@ -155,8 +184,12 @@ def run_verifier(task_dir, cfg, ws, timeout_sec=180):
         die(f"в {task_dir / 'task.yaml'} не задан verify.cmd")
     if cmd.startswith("python"):
         cmd = f'"{sys.executable}"' + cmd[len("python"):]
+    details_path = ws / ".hmb-details.jsonl"
+    if details_path.exists():  # хвост прошлого прогона (например, после таймаута)
+        details_path.unlink()
     env = os.environ.copy()
     env["HMB_WORKSPACE"] = str(ws)
+    env["HMB_DETAILS"] = str(ws / ".hmb-details.jsonl")
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
     try:
@@ -165,20 +198,112 @@ def run_verifier(task_dir, cfg, ws, timeout_sec=180):
                            errors="replace", timeout=timeout_sec,
                            stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        return 0.0, False, "verifier: таймаут", True
+        return 0.0, False, "verifier: таймаут", True, [], []
     out = r.stdout or ""
     if (r.stderr or "").strip():
         out += "\n[stderr]\n" + r.stderr.strip()
     tail = "\n".join(out.strip().splitlines()[-40:])
+    checks = [(m.group(1) == "ok", m.group(2), m.group(3) or "")
+              for m in CHECK_RE.finditer(out)]
+    details = _read_details(ws)
     score = None
     for m in re.finditer(r"^SCORE:\s*([0-9]*\.?[0-9]+)\s*$", out, re.M):
         score = float(m.group(1))
     if r.returncode != 0:
-        return 0.0, False, tail + "\n(verifier завершился с ошибкой — проверь verify.cmd)", True
+        return 0.0, False, tail + "\n(verifier завершился с ошибкой — проверь verify.cmd)", True, checks, details
     if score is None:
-        return 0.0, False, tail + "\n(verifier не напечатал SCORE:)", True
+        return 0.0, False, tail + "\n(verifier не напечатал SCORE:)", True, checks, details
     score = max(0.0, min(1.0, score))
-    return score, score >= 1.0, tail, False
+    return score, score >= 1.0, tail, False, checks, details
+
+
+def write_excel_report(rec, checks, details):
+    """Отчёт прогона: results/report-<таймстемп>-<task-id>.xlsx.
+
+    Лист «Статистика» — общие данные запуска, лист «Ошибки» — проваленные
+    проверки (или причина сбоя verifier'а), лист «Кейсы» — детальные кейсы
+    из $HMB_DETAILS (исходные данные, ответ системы, эталон).
+    Возвращает путь или None (нет openpyxl).
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+    except ImportError:
+        print("внимание: openpyxl не установлен — excel-отчёт не сформирован "
+              "(pip install openpyxl)")
+        return None
+    RESULTS_DIR.mkdir(exist_ok=True)
+    path = RESULTS_DIR / (f"report-{datetime.now().strftime(WS_TS_FORMAT)}"
+                          f"-{rec['task_id']}.xlsx")
+
+    versions = rec.get("versions") or {}
+    dur = rec.get("duration_sec")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Статистика"
+    rows = [
+        ("дата/время (utc)", rec.get("ts_utc")),
+        ("задача", rec.get("task_id")),
+        ("категория", rec.get("category")),
+        ("scoring", rec.get("scoring")),
+        ("score", rec.get("score")),
+        ("итог", "PASS" if rec.get("passed") else "FAIL"),
+        ("проверок", f"{len(checks)} всего, "
+                     f"{sum(1 for ok, _, _ in checks if ok)} ok, "
+                     f"{sum(1 for ok, _, _ in checks if not ok)} FAIL"),
+        ("verifier корректен", "нет" if rec.get("verifier_suspect") else "да"),
+        ("время от start", None if dur is None
+         else f"{dur // 60} мин {dur % 60} с ({dur} с)"),
+        ("модель", rec.get("model") or versions.get("model") or "не указана"),
+        ("расширение", versions.get("extension")),
+        ("vscode", versions.get("vscode")),
+        ("cli", versions.get("cli")),
+        ("python", versions.get("python")),
+        ("workspace", rec.get("workspace")),
+        ("заметки", rec.get("notes")),
+    ]
+    ws.append(("параметр", "значение"))
+    for row in rows:
+        ws.append(row)
+    ws["A1"].font = Font(bold=True)
+    ws["B1"].font = Font(bold=True)
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 100
+
+    ws2 = wb.create_sheet("Ошибки")
+    ws2.append(("проверка", "описание"))
+    errors = [(name, hint) for ok, name, hint in checks if not ok]
+    if rec.get("verifier_suspect"):
+        errors.append(("verifier", rec.get("verifier_tail")
+                       or "verifier не смог отработать корректно"))
+    if errors:
+        for name, hint in errors:
+            ws2.append((name, hint))
+    else:
+        ws2.append(("нет", ""))
+    ws2["A1"].font = Font(bold=True)
+    ws2["B1"].font = Font(bold=True)
+    ws2.column_dimensions["A"].width = 24
+    ws2.column_dimensions["B"].width = 110
+
+    if details:
+        ws3 = wb.create_sheet("Кейсы")
+        keys = []
+        for d in details:
+            for k in d:
+                if k not in keys:
+                    keys.append(k)
+        ws3.append(keys)
+        for d in details:
+            ws3.append([d.get(k) for k in keys])
+        ws3["A1"].font = Font(bold=True)
+        for i, k in enumerate(keys):
+            longest = max([len(str(d.get(k, ""))) for d in details] + [len(str(k))])
+            ws3.column_dimensions[ws3.cell(row=1, column=i + 1).column_letter] \
+               .width = min(60, max(12, longest + 2))
+
+    wb.save(path)
+    return path
 
 
 def verify_task(task_id, workspace=None, notes=None, model=None, record=True):
@@ -207,7 +332,7 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True):
         duration = round((datetime.now(timezone.utc)
                           - datetime.fromisoformat(started)).total_seconds())
 
-    score, passed, tail, suspect = run_verifier(task_dir, cfg, ws)
+    score, passed, tail, suspect, checks, details = run_verifier(task_dir, cfg, ws)
     rec = {
         "ts_utc": now_utc(),
         "mode": "manual",
@@ -221,6 +346,7 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True):
         "versions": versions,
         "notes": notes,
         "workspace": str(ws),
+        "verifier_suspect": suspect,
         "verifier_tail": tail,
     }
     print(("PASS " if passed else "FAIL ") + f"{task_id}  score={rec['score']}  [{rec['scoring']}]")
@@ -230,6 +356,12 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True):
         print("внимание: verifier не смог отработать корректно — записан score=0")
     print()
     print(tail)
+    report = write_excel_report(rec, checks, details)
+    if report:
+        print()
+        if details:
+            print(f"детальные кейсы: {len(details)} (лист «Кейсы» в отчёте)")
+        print(f"отчёт: {report}")
     if record:
         RESULTS_DIR.mkdir(exist_ok=True)
         with open(JOURNAL, "a", encoding="utf-8") as f:
@@ -255,7 +387,7 @@ def sanity_task(task_id):
             dst = ws / p.relative_to(sol)
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(p, dst)
-    score, passed, tail, suspect = run_verifier(task_dir, cfg, ws)
+    score, passed, tail, suspect, _, _ = run_verifier(task_dir, cfg, ws)
     ok = passed and not suspect
     print(("SANITY PASS " if ok else "SANITY FAIL ") + f"{task_id}  score={round(score, 4)}")
     if not ok:
