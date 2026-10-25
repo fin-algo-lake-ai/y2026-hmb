@@ -1,4 +1,4 @@
-"""Общие функции hmb_runner (v0, ручной режим)."""
+"""Общие функции hmb_runner (v0): ручной режим (run_manual) и headless CLI (run_cli)."""
 
 import json
 import os
@@ -13,8 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 TASKS_DIR = ROOT / "tasks"
 RESULTS_DIR = ROOT / "results"
 WORKSPACES_DIR = ROOT / "workspaces"
-JOURNAL = RESULTS_DIR / "journal.jsonl"
+JOURNAL = RESULTS_DIR / "journal.xlsx"
 EXTENSION_ID = "anthropic.claude-code"
+RUN_META_FILE = ".hmb-run.json"     # метаданные прогона внутри workspace
+CLI_SESSION_FILE = ".hmb-session.jsonl"  # stream-json лог сессии CLI (артефакт)
 WS_TS_FORMAT = "%Y%m%dT%H%M%S"  # в имени workspace: без двоеточий, сортируется как время
 WS_NAME_RE = re.compile(r"^(\d{8}T\d{6})-(.+)$")
 
@@ -22,6 +24,21 @@ WS_NAME_RE = re.compile(r"^(\d{8}T\d{6})-(.+)$")
 def die(msg, code=1):
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+def check_journal_writable():
+    """Ранняя проверка перед любой командой: файл журнала не заблокирован на запись
+    (например, открыт в Excel — иначе save упадёт с PermissionError в конце прогона).
+    """
+    if not JOURNAL.exists():
+        return
+    try:
+        with open(JOURNAL, "r+b"):
+            pass
+    except PermissionError:
+        die(f"файл журнала заблокирован на запись (скорее всего, открыт в Excel):\n"
+            f"  {JOURNAL}\n"
+            f"  закрой его и повтори команду")
 
 
 def now_utc():
@@ -115,16 +132,17 @@ def latest_workspace(task_id):
 
 
 def start_task(task_id, force=False):
+    """Ручной прогон (run_manual): workspace + промпт для панели VSCode."""
     task_dir, cfg = find_task(task_id)
     ws = workspace_dir(task_id)
     if ws.exists() and not force:
         die(f"workspace уже существует: {ws}\n"
-            "  (два старта в одну секунду? для пересоздания — `start --force`)")
+            "  (два старта в одну секунду? для пересоздания — `run_manual --force`)")
     _fresh_workspace(ws, task_dir)
     versions = snapshot_versions()
     meta = {"task_id": task_id, "started_utc": now_utc(),
-            "versions": versions, "model": None}
-    (ws / ".hmb-run.json").write_text(
+            "versions": versions, "model": None, "mode": "manual"}
+    (ws / RUN_META_FILE).write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     prompt = (cfg.get("prompt") or "").rstrip() + "\n"
     (ws / "_prompt.txt").write_text(prompt, encoding="utf-8")
@@ -142,6 +160,128 @@ def start_task(task_id, force=False):
     print("-" * 70)
     print()
     print(f"проверка после завершения: python -m hmb_runner verify {task_id}")
+
+
+def _parse_session(path):
+    """Читает stream-json лог сессии CLI; возвращает metrics из финального
+    события type="result" (последнего в логе; {} если его нет).
+
+    terminal_reason берётся как есть (причина завершения, если CLI её отдал).
+    """
+    metrics = {}
+    if not path.exists():
+        return metrics
+    for ln in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            obj = json.loads(ln)
+        except ValueError:
+            continue
+        if not (isinstance(obj, dict) and obj.get("type") == "result"):
+            continue
+        dur = obj.get("duration_ms")
+        api = obj.get("duration_api_ms")
+        metrics = {
+            "session_id": obj.get("session_id"),
+            "subtype": obj.get("subtype"),
+            "is_error": obj.get("is_error"),
+            "num_turns": obj.get("num_turns"),
+            "duration_sec": round(dur / 1000, 1) if dur is not None else None,
+            "api_sec": round(api / 1000, 1) if api is not None else None,
+            "cost_usd": obj.get("total_cost_usd"),
+            "usage": obj.get("usage"),
+            "terminal_reason": obj.get("terminal_reason"),
+            "result_excerpt": (obj.get("result") or "").strip()[:300] or None,
+        }
+    return metrics
+
+
+def run_cli_agent(cfg, ws, model=None, timeout_min=None):
+    """Headless-прогон агента: `claude -p` внутри workspace (вариант run_cli).
+
+    Полный stream-json лог пишется в <ws>/.hmb-session.jsonl (артефакт прогона).
+    Разрешения не запрашиваются (--dangerously-skip-permissions) — вызывающий
+    код обязан до этого показать WARNING (см. run_cli_task).
+    Возвращает (metrics, timed_out).
+    """
+    exe = shutil.which("claude")
+    if not exe:
+        die("CLI не найден: claude (проверь `python -m hmb_runner snapshot`)")
+    cmdline = [exe, "-p",
+               "--output-format", "stream-json", "--verbose",
+               "--dangerously-skip-permissions"]
+    if model:
+        cmdline += ["--model", model]
+    limit_min = timeout_min or cfg.get("time_limit_min") or 30
+    env = os.environ.copy()
+    env["DISABLE_AUTOUPDATER"] = "1"  # фиксация версии CLI на время прогона
+    timed_out = False
+    stderr_b = b""
+    with open(ws / "_prompt.txt", "r", encoding="utf-8") as fin, \
+         open(ws / CLI_SESSION_FILE, "w", encoding="utf-8") as flog:
+        print(f"агент работает (лимит {limit_min} мин), лог: {ws / CLI_SESSION_FILE}")
+        sys.stdout.flush()
+        try:
+            r = subprocess.run(cmdline, cwd=str(ws), stdin=fin, stdout=flog,
+                               stderr=subprocess.PIPE, timeout=limit_min * 60)
+        except subprocess.TimeoutExpired as e:
+            r, timed_out, stderr_b = e, True, e.stderr or b""
+        else:
+            stderr_b = r.stderr or b""
+    if timed_out:
+        print(f"ТАЙМАУТ: агент не уложился в {limit_min} мин — процесс остановлен, "
+              f"лог сессии сохранён, прогон помечен timed_out")
+    err = stderr_b.decode("utf-8", errors="replace").strip()
+    if err:
+        print("stderr CLI (хвост):")
+        print("\n".join(err.splitlines()[-10:]))
+    metrics = _parse_session(ws / CLI_SESSION_FILE)
+    if timed_out:
+        metrics["timed_out"] = True
+    return metrics, timed_out
+
+
+def run_cli_task(task_id, model=None, notes=None, timeout_min=None,
+                 force=False, record=True):
+    """Автоматический прогон: workspace + headless-агент + verifier + журнал."""
+    task_dir, cfg = find_task(task_id)
+    ws = workspace_dir(task_id)
+    if ws.exists() and not force:
+        die(f"workspace уже существует: {ws}\n"
+            "  (для пересоздания — `run_cli --force`)")
+    _fresh_workspace(ws, task_dir)
+    versions = snapshot_versions()
+    meta = {"task_id": task_id, "started_utc": now_utc(),
+            "versions": versions, "model": model, "mode": "cli"}
+    (ws / RUN_META_FILE).write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    prompt = (cfg.get("prompt") or "").rstrip() + "\n"
+    (ws / "_prompt.txt").write_text(prompt, encoding="utf-8")
+
+    print(f"workspace : {ws}")
+    print(f"задача    : {task_id} [{cfg.get('category')} / {cfg.get('difficulty')}, "
+          f"лимит {cfg.get('time_limit_min')} мин]")
+    print(f"версии    : cli {versions['cli']} | python {versions['python']}"
+          + (f" | модель {model}" if model else ""))
+    print("=" * 70)
+    print("WARNING: агент запускается с --dangerously-skip-permissions.")
+    print("  Подтверждения не запрашиваются: shell-команды, запись и удаление")
+    print("  файлов выполняются свободно, ограничение — только таймаут задачи.")
+    print("  Рекомендуется изоляция (контейнер/VM); workspace:", ws)
+    print("=" * 70)
+    print()
+
+    metrics, timed_out = run_cli_agent(cfg, ws, model=model,
+                                       timeout_min=timeout_min)
+    print()
+    if metrics.get("num_turns") is not None:
+        print(f"агент: {metrics['num_turns']} шагов, "
+              f"{metrics.get('duration_sec')} с, "
+              f"terminal_reason={metrics.get('terminal_reason')}")
+    return verify_task(task_id, workspace=str(ws), notes=notes, model=model,
+                       record=record, metrics=metrics)
 
 
 CHECK_RE = re.compile(r"^(ok|FAIL)\s+(\S+)(?:\s+\((.*)\))?\s*$", re.M)
@@ -252,8 +392,8 @@ def write_excel_report(rec, checks, details):
                      f"{sum(1 for ok, _, _ in checks if ok)} ok, "
                      f"{sum(1 for ok, _, _ in checks if not ok)} FAIL"),
         ("verifier корректен", "нет" if rec.get("verifier_suspect") else "да"),
-        ("время от start", None if dur is None
-         else f"{dur // 60} мин {dur % 60} с ({dur} с)"),
+        ("время" + ("" if rec.get("mode") == "cli" else " от start"),
+         None if dur is None else f"{dur // 60} мин {dur % 60} с ({dur} с)"),
         ("модель", rec.get("model") or versions.get("model") or "не указана"),
         ("расширение", versions.get("extension")),
         ("vscode", versions.get("vscode")),
@@ -262,6 +402,22 @@ def write_excel_report(rec, checks, details):
         ("workspace", rec.get("workspace")),
         ("заметки", rec.get("notes")),
     ]
+    m = rec.get("metrics")
+    if m:
+        usage = m.get("usage") or {}
+        rows += [
+            ("шагов агента", m.get("num_turns")),
+            ("время агента / api (с)", None if m.get("duration_sec") is None
+             else f"{m.get('duration_sec')} / {m.get('api_sec')}"),
+            ("токены in/out (кэш read/creation)",
+             f"{usage.get('input_tokens', 0)} / {usage.get('output_tokens', 0)} "
+             f"({usage.get('cache_read_input_tokens', 0)} / "
+             f"{usage.get('cache_creation_input_tokens', 0)})"),
+            ("стоимость (usd)", m.get("cost_usd")),
+            ("terminal_reason", m.get("terminal_reason")),
+            ("timed_out", bool(m.get("timed_out"))),
+            ("session_id", m.get("session_id")),
+        ]
     ws.append(("параметр", "значение"))
     for row in rows:
         ws.append(row)
@@ -306,7 +462,115 @@ def write_excel_report(rec, checks, details):
     return path
 
 
-def verify_task(task_id, workspace=None, notes=None, model=None, record=True):
+JOURNAL_COLS = ["ts_utc", "mode", "task_id", "category", "scoring", "score",
+                "passed", "manual_sec", "manual_credits", "manual_usd",
+                "duration_sec", "model", "extension", "vscode", "cli",
+                "python", "notes", "workspace", "verifier_suspect",
+                "num_turns", "agent_sec", "api_sec", "cost_usd",
+                "terminal_reason", "session_id"]
+
+
+def _new_journal_book():
+    """Новый журнал: лист «Журнал», шапка, ширины колонок, закреплённая шапка."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Журнал"
+    ws.append(JOURNAL_COLS)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    widths = {"A": 20, "B": 7, "C": 22, "D": 9, "E": 8, "F": 7, "G": 8,
+              "H": 12, "I": 15, "J": 12, "K": 12, "L": 18, "M": 10, "N": 9,
+              "O": 20, "P": 8, "Q": 30, "R": 60, "S": 9, "T": 9, "U": 10,
+              "V": 8, "W": 10, "X": 16, "Y": 38}
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = "A2"
+    return wb
+
+
+def append_journal(rec):
+    """Дописывает прогон строкой в общий excel-журнал results/journal.xlsx.
+
+    Лист «Журнал» — одна строка на прогон, шапка создаётся при первом запуске.
+    Значения раскладываются по заголовкам файла, так что колонки можно вручную
+    переставлять и дополнять своими (новые строки придут с пустыми значениями).
+    Версии из rec.versions и метрики CLI-прогона из rec.metrics разворачиваются
+    в отдельные колонки. Если журнал заблокирован на запись (например, открыт
+    в Excel) — при старте это ловит check_journal_writable(), а здесь, на случай
+    блокировки прямо во время прогона, запись уходит во временный
+    journal-DRAFT-<таймстемп>.xlsx. Возвращает путь или None (нет openpyxl).
+    """
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        print("внимание: openpyxl не установлен — запись в журнал пропущена "
+              "(pip install openpyxl)")
+        return None
+    RESULTS_DIR.mkdir(exist_ok=True)
+    versions = rec.get("versions") or {}
+    m = rec.get("metrics") or {}
+    row = [
+        rec.get("ts_utc"), rec.get("mode"), rec.get("task_id"),
+        rec.get("category"), rec.get("scoring"), rec.get("score"),
+        rec.get("passed"),
+        None, None, None,  # manual_sec / manual_credits / manual_usd — заполняет оператор
+        rec.get("duration_sec"),
+        rec.get("model") or versions.get("model"),
+        versions.get("extension"), versions.get("vscode"), versions.get("cli"),
+        versions.get("python"), rec.get("notes"), rec.get("workspace"),
+        bool(rec.get("verifier_suspect")),
+        m.get("num_turns"), m.get("duration_sec"), m.get("api_sec"),
+        m.get("cost_usd"), m.get("terminal_reason"), m.get("session_id"),
+    ]
+    history_lost = False
+    if JOURNAL.exists():
+        try:
+            wb = load_workbook(JOURNAL)
+        except PermissionError:
+            # журнал уже заблокирован (чтение тоже запрещено) — draft будет
+            # только с этой записью, прежние строки остаются в основном журнале
+            history_lost = True
+            wb = _new_journal_book()
+    else:
+        wb = _new_journal_book()
+    ws = wb.active
+    vals = dict(zip(JOURNAL_COLS, row))
+    if history_lost:
+        ws.append([vals[c] for c in JOURNAL_COLS])
+    else:
+        # значения раскладываются по заголовкам файла, а не позиционно:
+        # колонки можно вручную переставлять и дополнять своими
+        header = [c.value for c in ws[1]]
+        if header != JOURNAL_COLS:
+            missing = [c for c in JOURNAL_COLS if c not in header]
+            extra = [c for c in header if c and c not in JOURNAL_COLS]
+            if missing:
+                print(f"внимание: в журнале нет колонок ({', '.join(missing)}) "
+                      f"— эти поля в новой строке не сохранены")
+            if extra:
+                print(f"свои колонки ({', '.join(extra)}) — в новых строках останутся пустыми")
+            ws.append([vals.get(c) for c in header])
+        else:
+            ws.append(row)
+    try:
+        wb.save(JOURNAL)
+        return JOURNAL
+    except PermissionError:
+        draft = RESULTS_DIR / (f"journal-DRAFT-{datetime.now().strftime(WS_TS_FORMAT)}.xlsx")
+        wb.save(draft)
+        tail = ("вся история + эта запись" if not history_lost
+                else "только эта запись, прежние строки остались в journal.xlsx")
+        print(f"внимание: журнал заблокирован на запись (открыт в Excel?) — результат "
+              f"записан во временный:\n  {draft}\n"
+              f"  ({tail})\n"
+              f"  после закрытия Excel перенеси данные в {JOURNAL.name}, а draft удали")
+        return draft
+
+
+def verify_task(task_id, workspace=None, notes=None, model=None, record=True,
+                metrics=None):
     task_dir, cfg = find_task(task_id)
     if workspace:
         ws = Path(workspace).resolve()
@@ -316,26 +580,35 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True):
         ws = latest_workspace(task_id)
         if ws is None:
             die(f"workspace задачи {task_id} не найден (workspaces/<таймстемп>-{task_id}); "
-                f"сначала `python -m hmb_runner start {task_id}`")
+                f"сначала `run_manual {task_id}` или `run_cli {task_id}`")
     started = None
+    mode = "manual"
     versions = None
-    meta_path = ws / ".hmb-run.json"
+    meta_model = None
+    meta_path = ws / RUN_META_FILE
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         started = meta.get("started_utc")
         versions = meta.get("versions")
+        mode = meta.get("mode") or "manual"
+        meta_model = meta.get("model")
     if model:
         versions = dict(versions or snapshot_versions())
         versions["model"] = model
+    else:
+        model = meta_model  # модель из метаданных прогона (run_cli --model)
+    # у CLI-прогона точное время агента берём из лога сессии (артефакт workspace)
+    metrics = dict(metrics or _parse_session(ws / CLI_SESSION_FILE)) or None
     duration = None
-    if started:
+    if metrics and metrics.get("duration_sec") is not None:
+        duration = metrics["duration_sec"]
+    elif started:
         duration = round((datetime.now(timezone.utc)
                           - datetime.fromisoformat(started)).total_seconds())
-
     score, passed, tail, suspect, checks, details = run_verifier(task_dir, cfg, ws)
     rec = {
         "ts_utc": now_utc(),
-        "mode": "manual",
+        "mode": mode,
         "task_id": task_id,
         "category": cfg.get("category"),
         "scoring": (cfg.get("verify") or {}).get("scoring"),
@@ -349,9 +622,12 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True):
         "verifier_suspect": suspect,
         "verifier_tail": tail,
     }
-    print(("PASS " if passed else "FAIL ") + f"{task_id}  score={rec['score']}  [{rec['scoring']}]")
+    if metrics:
+        rec["metrics"] = metrics
+    print(("PASS " if passed else "FAIL ") + f"{task_id}  score={rec['score']}  [{rec['scoring']}]"
+          + (f"  [{mode}]" if mode != "manual" else ""))
     if duration is not None:
-        print(f"время от start: {duration // 60} мин {duration % 60} с")
+        print(f"время: {int(duration) // 60} мин {int(duration) % 60} с")
     if suspect:
         print("внимание: verifier не смог отработать корректно — записан score=0")
     print()
@@ -363,11 +639,10 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True):
             print(f"детальные кейсы: {len(details)} (лист «Кейсы» в отчёте)")
         print(f"отчёт: {report}")
     if record:
-        RESULTS_DIR.mkdir(exist_ok=True)
-        with open(JOURNAL, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        print()
-        print(f"записано: {JOURNAL}")
+        journal = append_journal(rec)
+        if journal:
+            print()
+            print(f"записано: {journal}")
     return passed
 
 

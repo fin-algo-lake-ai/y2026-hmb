@@ -38,7 +38,7 @@ hmb/
   hmb_runner/              # CLI ручного режима: list / start / verify / sanity / snapshot
   suites/
     core.yaml              # набор задач для базового прогона
-  results/                 # журнал прогонов (journal.jsonl), в .gitignore
+  results/                 # журнал прогонов (journal.xlsx), в .gitignore
   workspaces/              # рабочие папки прогонов, в .gitignore
   report/                  # (v1+) генератор markdown-отчёта
 ```
@@ -112,7 +112,7 @@ python -m hmb_runner run --suite suites/core.yaml --harness ext-1-2-3 --runs 3
 
 - `python -m hmb_runner list` — список задач.
 - `python -m hmb_runner start <task-id>` — разворачивает чистый workspace из `env/` задачи, снимает версии (5.4) и печатает промпт для вставки в панель.
-- Агент работает в панели; по завершении `python -m hmb_runner verify <task-id>` запускает verifier на workspace и дописывает результат в `results/journal.jsonl` (`--no-record` — проверить без записи; `--notes`, `--model` — метаданные прогона).
+- Агент работает в панели; по завершении `python -m hmb_runner verify <task-id>` запускает verifier на workspace и дописывает результат строкой в `results/journal.xlsx` (`--no-record` — проверить без записи; `--notes`, `--model` — метаданные прогона).
 - `python -m hmb_runner sanity --all` — verifier на эталонных решениях: score каждой задачи обязан быть 1.0.
 - Метрики в ручном режиме: время считается от `start`; токены и стоимость — `/cost` в сессии; полный транскрипт остаётся в `~/.claude/projects/...`.
 
