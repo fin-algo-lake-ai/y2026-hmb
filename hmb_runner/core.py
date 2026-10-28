@@ -462,12 +462,18 @@ def write_excel_report(rec, checks, details):
     return path
 
 
+# Колонки журнала, которые код пишет сам (раскладка по заголовкам в append_journal).
 JOURNAL_COLS = ["ts_utc", "mode", "task_id", "category", "scoring", "score",
-                "passed", "manual_sec", "manual_credits", "manual_usd",
-                "duration_sec", "model", "extension", "vscode", "cli",
+                "passed", "duration_sec", "model", "extension", "vscode", "cli",
                 "python", "notes", "workspace", "verifier_suspect",
                 "num_turns", "agent_sec", "api_sec", "cost_usd",
                 "terminal_reason", "session_id"]
+
+# Ручные колонки журнала — заполняет оператор, код в них не пишет; список нужен
+# только чтобы создать их в шапке нового журнала (_new_journal_book).
+JOURNAL_MANUAL_COLS = ["manual\nseconds", "manual\nz\ncredits", "manual\nz\nusd", "manual\nclaude\napi\nusd"]
+
+JOURNAL_ALL_COLS = JOURNAL_COLS + JOURNAL_MANUAL_COLS
 
 
 def _new_journal_book():
@@ -477,7 +483,7 @@ def _new_journal_book():
     wb = Workbook()
     ws = wb.active
     ws.title = "Журнал"
-    ws.append(JOURNAL_COLS)
+    ws.append(JOURNAL_ALL_COLS)
     for cell in ws[1]:
         cell.font = Font(bold=True)
     widths = {"A": 20, "B": 7, "C": 22, "D": 9, "E": 8, "F": 7, "G": 8,
@@ -511,19 +517,30 @@ def append_journal(rec):
     RESULTS_DIR.mkdir(exist_ok=True)
     versions = rec.get("versions") or {}
     m = rec.get("metrics") or {}
-    row = [
-        rec.get("ts_utc"), rec.get("mode"), rec.get("task_id"),
-        rec.get("category"), rec.get("scoring"), rec.get("score"),
-        rec.get("passed"),
-        None, None, None,  # manual_sec / manual_credits / manual_usd — заполняет оператор
-        rec.get("duration_sec"),
-        rec.get("model") or versions.get("model"),
-        versions.get("extension"), versions.get("vscode"), versions.get("cli"),
-        versions.get("python"), rec.get("notes"), rec.get("workspace"),
-        bool(rec.get("verifier_suspect")),
-        m.get("num_turns"), m.get("duration_sec"), m.get("api_sec"),
-        m.get("cost_usd"), m.get("terminal_reason"), m.get("session_id"),
-    ]
+    vals = {
+        "ts_utc": rec.get("ts_utc"),
+        "mode": rec.get("mode"),
+        "task_id": rec.get("task_id"),
+        "category": rec.get("category"),
+        "scoring": rec.get("scoring"),
+        "score": rec.get("score"),
+        "passed": rec.get("passed"),
+        "duration_sec": rec.get("duration_sec"),
+        "model": rec.get("model") or versions.get("model"),
+        "extension": versions.get("extension"),
+        "vscode": versions.get("vscode"),
+        "cli": versions.get("cli"),
+        "python": versions.get("python"),
+        "notes": rec.get("notes"),
+        "workspace": rec.get("workspace"),
+        "verifier_suspect": bool(rec.get("verifier_suspect")),
+        "num_turns": m.get("num_turns"),
+        "agent_sec": m.get("duration_sec"),
+        "api_sec": m.get("api_sec"),
+        "cost_usd": m.get("cost_usd"),
+        "terminal_reason": m.get("terminal_reason"),
+        "session_id": m.get("session_id"),
+    }
     history_lost = False
     if JOURNAL.exists():
         try:
@@ -536,14 +553,13 @@ def append_journal(rec):
     else:
         wb = _new_journal_book()
     ws = wb.active
-    vals = dict(zip(JOURNAL_COLS, row))
     if history_lost:
-        ws.append([vals[c] for c in JOURNAL_COLS])
+        ws.append([vals.get(c) for c in JOURNAL_ALL_COLS])
     else:
         # значения раскладываются по заголовкам файла, а не позиционно:
         # колонки можно вручную переставлять и дополнять своими
         header = [c.value for c in ws[1]]
-        if header != JOURNAL_COLS:
+        if header != JOURNAL_ALL_COLS:
             missing = [c for c in JOURNAL_COLS if c not in header]
             extra = [c for c in header if c and c not in JOURNAL_COLS]
             if missing:
@@ -551,9 +567,7 @@ def append_journal(rec):
                       f"— эти поля в новой строке не сохранены")
             if extra:
                 print(f"свои колонки ({', '.join(extra)}) — в новых строках останутся пустыми")
-            ws.append([vals.get(c) for c in header])
-        else:
-            ws.append(row)
+        ws.append([vals.get(c) for c in header])
     try:
         wb.save(JOURNAL)
         return JOURNAL
