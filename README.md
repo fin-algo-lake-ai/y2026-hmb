@@ -23,7 +23,7 @@ python -m hmb_runner sanity --all          # verifier'ы обязаны прох
 ### 1.2 - Вариант 1: run_manual — ручной прогон через панель VSCode (бывш. `start`)
 
 ```
-python -m hmb_runner run_manual <task-id>  # развернёт workspaces/<таймстемп>-<task-id>,
+python -m hmb_runner run_manual <task-id>  # развернёт ../y2026-hmb-workspaces/<таймстемп>-<task-id>,
                                            # снимет версии, напечатает промпт для панели
 # Открыть workspace в VSCode (скопировать и запустить строчку "code ...")
 # Зафиксировать токены перед стартом, подготовить таймер
@@ -61,7 +61,7 @@ python -m hmb_runner run_cli <task-id> [--model <model>] [--timeout-min N]
 
 ## 2 - Подробности
 
-Каждый прогон создаёт отдельный воркспейс `workspaces/<ГГГГММДДТЧЧММСС>-<task-id>`
+Каждый прогон создаёт отдельный воркспейс `../y2026-hmb-workspaces/<ГГГГММДДТЧЧММСС>-<task-id>`
 (локальное время, точность до секунды), так что повторные прогоны не затирают друг друга.
 `verify` без `--workspace` берёт самый свежий воркспейс задачи (режим прогона —
 `manual` или `cli` — определяется по метаданным workspace).
@@ -77,7 +77,12 @@ python -m hmb_runner run_cli <task-id> [--model <model>] [--timeout-min N]
 Кроме журнала, `verify` формирует индивидуальный excel-отчёт прогона
 `results/report-<ГГГГММДДТЧЧММСС>-<task-id>.xlsx`: лист «Статистика» (score, время,
 модель, версии, метрики CLI-прогона и т.п.) и лист «Ошибки» со списком проваленных
-проверок.
+проверок. Для CLI-прогонов из лога сессии `.hmb-session.jsonl` дополнительно
+строится трасса решения — все действия агента (команды и их вывод, текстовые
+сообщения, thinking-блоки в html) — в `<workspace>/_verifier_reports/`:
+`trace.md` (выводы длиннее 50 строк уносятся в `attachments/`) и `trace.html`
+(без обрезки, шаги сворачиваются); генерация — на этапе verify, вне времени
+прогона бенчмарка.
 
 ## 3 - Структура
 
@@ -88,4 +93,4 @@ python -m hmb_runner run_cli <task-id> [--model <model>] [--timeout-min N]
   данных с фиксированным сидом)
 - `hmb_runner/` — CLI прогона: `list / run_manual / run_cli / verify / sanity / snapshot`
 - `suites/core.yaml` — набор задач v0 (по одной на категорию)
-- `results/`, `workspaces/` — журнал прогонов и рабочие папки (в git не входят)
+- `results/` (в репе), `../y2026-hmb-workspaces/` (рядом с репой) — журнал прогонов и рабочие папки (в git не входят)

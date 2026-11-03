@@ -39,7 +39,7 @@ hmb/
   suites/
     core.yaml              # набор задач для базового прогона
   results/                 # журнал прогонов (journal.xlsx), в .gitignore
-  workspaces/              # рабочие папки прогонов, в .gitignore
+  workspaces/              # рабочие папки прогонов, рядом с репой: ../y2026-hmb-workspaces
   report/                  # (v1+) генератор markdown-отчёта
 ```
 

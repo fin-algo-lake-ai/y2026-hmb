@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TASKS_DIR = ROOT / "tasks"
 RESULTS_DIR = ROOT / "results"
-WORKSPACES_DIR = ROOT / "workspaces"
+WORKSPACES_DIR = ROOT.parent / "y2026-hmb-workspaces"  # рядом с репой, вне её
 JOURNAL = RESULTS_DIR / "journal.xlsx"
 EXTENSION_ID = "anthropic.claude-code"
 RUN_META_FILE = ".hmb-run.json"     # метаданные прогона внутри workspace
@@ -108,14 +108,14 @@ def _fresh_workspace(ws, task_dir):
 
 
 def workspace_dir(task_id):
-    """Каталог нового прогона: workspaces/<таймстемп>-<task-id> (локальное время, до секунды)."""
+    """Каталог нового прогона: y2026-hmb-workspaces/<таймстемп>-<task-id> (локальное время, до секунды)."""
     return WORKSPACES_DIR / f"{datetime.now().strftime(WS_TS_FORMAT)}-{task_id}"
 
 
 def latest_workspace(task_id):
     """Самый свежий workspace задачи по таймстемпу в имени; None, если нет.
 
-    Понимает и старое имя без таймстемпа (workspaces/<task-id>), считая его самым старым.
+    Понимает и старое имя без таймстемпа (<task-id>), считая его самым старым.
     """
     if not WORKSPACES_DIR.exists():
         return None
@@ -593,7 +593,7 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True,
     else:
         ws = latest_workspace(task_id)
         if ws is None:
-            die(f"workspace задачи {task_id} не найден (workspaces/<таймстемп>-{task_id}); "
+            die(f"workspace задачи {task_id} не найден (<таймстемп>-{task_id}); "
                 f"сначала `run_manual {task_id}` или `run_cli {task_id}`")
     started = None
     mode = "manual"
@@ -652,6 +652,11 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True,
         if details:
             print(f"детальные кейсы: {len(details)} (лист «Кейсы» в отчёте)")
         print(f"отчёт: {report}")
+    # трасса решения из лога CLI-сессии — вне времени прогона, ошибка не фатальна
+    from hmb_runner import trace as trace_mod
+    trace_dir = trace_mod.write_trace_reports(ws, rec)
+    if trace_dir:
+        print(f"трасса решения: {trace_dir / 'trace.html'} (+ trace.md)")
     if record:
         journal = append_journal(rec)
         if journal:
@@ -663,7 +668,7 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True,
 def sanity_task(task_id):
     """Санити задачи: эталонное решение обязано набрать score = 1.0.
 
-    workspaces/_sanity/<task-id> — служебная папка, без таймстемпа в имени.
+    y2026-hmb-workspaces/_sanity/<task-id> — служебная папка, без таймстемпа в имени.
     """
     task_dir, cfg = find_task(task_id)
     sol = task_dir / "solution"
