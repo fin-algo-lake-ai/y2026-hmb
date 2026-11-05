@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -43,6 +44,11 @@ def check_journal_writable():
 
 def now_utc():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def host_name():
+    """Имя машины, где выполняется прогон (до первой точки, в нижнем регистре)."""
+    return socket.gethostname().split(".")[0].lower()
 
 
 def load_yaml(path):
@@ -140,7 +146,7 @@ def start_task(task_id, force=False):
             "  (два старта в одну секунду? для пересоздания — `run_manual --force`)")
     _fresh_workspace(ws, task_dir)
     versions = snapshot_versions()
-    meta = {"task_id": task_id, "started_utc": now_utc(),
+    meta = {"task_id": task_id, "started_utc": now_utc(), "host": host_name(),
             "versions": versions, "model": None, "mode": "manual"}
     (ws / RUN_META_FILE).write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -253,7 +259,7 @@ def run_cli_task(task_id, model=None, notes=None, timeout_min=None,
             "  (для пересоздания — `run_cli --force`)")
     _fresh_workspace(ws, task_dir)
     versions = snapshot_versions()
-    meta = {"task_id": task_id, "started_utc": now_utc(),
+    meta = {"task_id": task_id, "started_utc": now_utc(), "host": host_name(),
             "versions": versions, "model": model, "mode": "cli"}
     (ws / RUN_META_FILE).write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -399,6 +405,7 @@ def write_excel_report(rec, checks, details):
         ("vscode", versions.get("vscode")),
         ("cli", versions.get("cli")),
         ("python", versions.get("python")),
+        ("хост", rec.get("host")),
         ("workspace", rec.get("workspace")),
         ("заметки", rec.get("notes")),
     ]
@@ -465,7 +472,7 @@ def write_excel_report(rec, checks, details):
 # Колонки журнала, которые код пишет сам (раскладка по заголовкам в append_journal).
 JOURNAL_COLS = ["ts_utc", "mode", "task_id", "category", "scoring", "score",
                 "passed", "duration_sec", "model", "extension", "vscode", "cli",
-                "python", "notes", "workspace", "verifier_suspect",
+                "python", "notes", "host", "workspace", "verifier_suspect",
                 "num_turns", "agent_sec", "api_sec", "cost_usd",
                 "terminal_reason", "session_id"]
 
@@ -488,8 +495,8 @@ def _new_journal_book():
         cell.font = Font(bold=True)
     widths = {"A": 20, "B": 7, "C": 22, "D": 9, "E": 8, "F": 7, "G": 8,
               "H": 12, "I": 15, "J": 12, "K": 12, "L": 18, "M": 10, "N": 9,
-              "O": 20, "P": 8, "Q": 30, "R": 60, "S": 9, "T": 9, "U": 10,
-              "V": 8, "W": 10, "X": 16, "Y": 38}
+              "O": 8, "P": 20, "Q": 8, "R": 30, "S": 60, "T": 9, "U": 9,
+              "V": 10, "W": 8, "X": 10, "Y": 16, "Z": 38}
     for col, w in widths.items():
         ws.column_dimensions[col].width = w
     ws.freeze_panes = "A2"
@@ -532,6 +539,7 @@ def append_journal(rec):
         "cli": versions.get("cli"),
         "python": versions.get("python"),
         "notes": rec.get("notes"),
+        "host": rec.get("host") or host_name(),
         "workspace": rec.get("workspace"),
         "verifier_suspect": bool(rec.get("verifier_suspect")),
         "num_turns": m.get("num_turns"),
@@ -599,6 +607,7 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True,
     mode = "manual"
     versions = None
     meta_model = None
+    host = None
     meta_path = ws / RUN_META_FILE
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -606,6 +615,7 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True,
         versions = meta.get("versions")
         mode = meta.get("mode") or "manual"
         meta_model = meta.get("model")
+        host = meta.get("host")
     if model:
         versions = dict(versions or snapshot_versions())
         versions["model"] = model
@@ -631,6 +641,7 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True,
         "duration_sec": duration,
         "model": model or (versions or {}).get("model"),
         "versions": versions,
+        "host": host or host_name(),
         "notes": notes,
         "workspace": str(ws),
         "verifier_suspect": suspect,

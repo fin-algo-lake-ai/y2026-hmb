@@ -151,6 +151,8 @@ def _write_reports(log, out_dir, rec):
     def rows():
         yield "Модель", meta.get("model") or rec.get("model")
         yield "Режим", rec.get("mode")
+        if rec.get("host"):
+            yield "Хост", rec.get("host")
         if versions:
             yield "Версии", "cli %s, vscode %s, python %s" % (
                 versions.get("cli"), versions.get("vscode"), versions.get("python"))
