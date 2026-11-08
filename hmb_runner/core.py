@@ -166,6 +166,21 @@ def latest_workspace(task_id):
     return max(candidates)[1] if candidates else None
 
 
+def usage_checkpoint():
+    """Пауза перед стартом задания: пользователь фиксирует расход (токены,
+    кредиты, стоимость), чтобы после теста вычислить разницу.
+
+    В неинтерактивном запуске (stdin не tty) пауза пропускается.
+    """
+    if not (sys.stdin and sys.stdin.isatty()):
+        print("(stdin не tty — пауза фиксации расхода пропущена)")
+        return
+    print("чекпоинт расхода: запишите текущие показатели агента —")
+    print("  токены / кредиты / стоимость (и номер запроса),")
+    input("  затем нажмите Enter для продолжения ")
+    print()
+
+
 def start_task(task_id, force=False):
     """Ручной прогон (run_manual): workspace + промпт для панели VSCode."""
     task_dir, cfg = find_task(task_id)
@@ -195,6 +210,8 @@ def start_task(task_id, force=False):
     print("-" * 70)
     print()
     print(f"проверка после завершения: python -m hmb_runner verify {task_id}")
+    print()
+    usage_checkpoint()
 
 
 def _parse_session(path):
@@ -390,6 +407,7 @@ def run_cli_task(task_id, model=None, notes=None, timeout_min=None,
     print("  Рекомендуется изоляция (контейнер/VM); workspace:", ws)
     print("=" * 70)
     print()
+    usage_checkpoint()
 
     metrics, timed_out = run_cli_agent(cfg, ws, model=model,
                                        timeout_min=timeout_min, agent=agent)
@@ -746,6 +764,7 @@ def verify_task(task_id, workspace=None, notes=None, model=None, record=True,
     rec = {
         "ts_utc": now_utc(),
         "mode": mode,
+        "agent": meta.get("agent"),
         "task_id": task_id,
         "category": cfg.get("category"),
         "scoring": (cfg.get("verify") or {}).get("scoring"),
