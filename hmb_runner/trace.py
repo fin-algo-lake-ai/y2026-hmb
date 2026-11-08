@@ -41,13 +41,110 @@ def _tool_input(tool, inp):
     return json.dumps(inp, ensure_ascii=False, indent=1)
 
 
+def _extract_zcode(events):
+    """Разбор zcode stream-json (события с payload и dotted-типами).
+
+    -> (meta, steps): та же структура, что у claude-ветки _extract.
+    Текст/thinking копятся из model.streaming (text_delta/reasoning_delta);
+    шаги — из model.streaming kind=tool_call (полный вызов с input) и
+    tool.updated kind=result (вывод инструмента по toolCallId).
+    """
+    meta, steps = {}, []
+    cur_notes, cur_thinking = [], []   # закрытые сегменты до текущего шага
+    buf, seg = None, []                # открытый сегмент: "text" или "thinking"
+    by_call = {}                       # toolCallId -> step
+    completed = None                   # payload события turn.completed
+    for e in events:
+        t = e.get("type")
+        p = e.get("payload") or {}
+        if t == "turn.started":
+            meta["session_id"] = e.get("sessionId")
+            sel = ((p.get("intent") or {}).get("modelSelection") or {})
+            if sel.get("modelId"):
+                model = "%s/%s" % (sel.get("providerId", "?"), sel["modelId"])
+                lvl = (sel.get("options") or {}).get("reasoningLevel")
+                if lvl:
+                    model += " (effort %s)" % lvl
+                meta["model"] = model
+        elif t == "model.streaming":
+            k = p.get("kind")
+            if k == "text_start":
+                buf = "text"
+            elif k == "reasoning_start":
+                buf = "thinking"
+            elif k == "text_delta" and buf == "text":
+                seg.append(p.get("delta") or "")
+            elif k == "reasoning_delta" and buf == "thinking":
+                seg.append(p.get("delta") or "")
+            elif k in ("text_end", "reasoning_end"):
+                if buf == "text":
+                    cur_notes.append("".join(seg))
+                elif buf == "thinking":
+                    cur_thinking.append("".join(seg))
+                buf, seg = None, []
+            elif k == "tool_call":
+                step = {"idx": len(steps) + 1, "tool": p.get("toolName"),
+                        "input": p.get("input") or {}, "output": None,
+                        "is_error": False, "persisted": None,
+                        "notes_before": cur_notes, "thinking_before": cur_thinking}
+                steps.append(step)
+                if p.get("toolCallId"):
+                    by_call[p["toolCallId"]] = step
+                cur_notes, cur_thinking = [], []
+        elif t == "tool.updated" and p.get("kind") == "result":
+            res = p.get("result") or {}
+            out = res.get("content")
+            if not isinstance(out, str):
+                out = json.dumps(out, ensure_ascii=False, indent=1) if out is not None else ""
+            st = by_call.get(p.get("toolCallId"))
+            if st is not None:
+                st["output"] = out
+                st["is_error"] = not res.get("success", True)
+            else:
+                steps.append({"idx": len(steps) + 1, "tool": "?", "input": {},
+                              "output": out, "is_error": not res.get("success", True),
+                              "persisted": None, "notes_before": [], "thinking_before": []})
+        elif t == "turn.completed":
+            completed = p
+        elif t == "result":
+            # финальная строка дублирует turn.completed; берем response как fallback
+            final = e
+    if completed:
+        u = completed.get("usage") or {}
+        meta["result"] = {
+            "session_id": meta.get("session_id"),
+            "num_turns": completed.get("historyRoundCount"),
+            "duration_ms": completed.get("duration"),
+            "duration_api_ms": None,
+            "total_cost_usd": None,
+            "usage": {
+                "input_tokens": u.get("inputTokens"),
+                "output_tokens": u.get("outputTokens"),
+                "cache_read_input_tokens": u.get("cacheReadTokens"),
+            },
+            "is_error": completed.get("resultType") not in (None, "success"),
+            "terminal_reason": completed.get("resultType"),
+        }
+    if not meta.get("result"):
+        meta["result"] = {}
+    meta["result_text"] = (completed or {}).get("response") or ""
+    if cur_notes:
+        meta["final_notes"] = cur_notes
+    return meta, steps
+
+
 def _extract(log_path):
     """-> (meta, steps): meta — модель/сессия/метрики финального события,
     steps — [{idx, tool, input, output, is_error, notes_before, thinking_before}].
-    Вывод, усечённый CLI (persisted-output), добывается из файла с полным текстом.
+    Формат определяется по типам событий: dotted-типы (turn.started и т.п.) —
+    zcode; иначе claude code stream-json. Вывод, усечённый CLI (persisted-output),
+    добывается из файла с полным текстом (только claude).
     """
+    events = _read_events(log_path)
+    if any("." in str(e.get("type")) for e in events):
+        return _extract_zcode(events)
     meta, steps, notes, thinking = {}, [], [], []
-    for e in _read_events(log_path):
+    for e in events:
         t = e.get("type")
         if t == "system" and e.get("subtype") == "init":
             meta["model"] = e.get("model")
@@ -151,11 +248,17 @@ def _write_reports(log, out_dir, rec):
     def rows():
         yield "Модель", meta.get("model") or rec.get("model")
         yield "Режим", rec.get("mode")
+        if rec.get("agent"):
+            yield "Агент", rec.get("agent")
         if rec.get("host"):
             yield "Хост", rec.get("host")
         if versions:
             yield "Версии", "cli %s, vscode %s, python %s" % (
                 versions.get("cli"), versions.get("vscode"), versions.get("python"))
+        if versions.get("zcode_cli"):
+            yield "ZCode", "%s%s" % (versions.get("zcode_cli"),
+                                     ", модель %s" % versions["zcode_model"]
+                                     if versions.get("zcode_model") else "")
         yield "Session", res.get("session_id") or meta.get("session_id")
         yield "Шаги / ходы", "%d / %s" % (len(steps), res.get("num_turns"))
         dur = _fmt_duration(res.get("duration_ms"))

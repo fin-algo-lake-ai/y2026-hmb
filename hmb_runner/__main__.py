@@ -27,9 +27,13 @@ def main():
                    help="пересоздать workspace, даже если он уже есть")
 
     p = sub.add_parser("run_cli", help="автоматический прогон: headless-агент "
-                                       "`claude -p` + verifier + журнал")
+                                       "(`claude -p` / `zcode -p`) + verifier + журнал")
     p.add_argument("task_id")
-    p.add_argument("--model", help="модель для агента (иначе модель по умолчанию CLI)")
+    p.add_argument("--agent", choices=["claude", "zcode"], default="claude",
+                   help="headless-агент (по умолчанию claude; zcode — Z.ai GLM, "
+                        "модель/effort фиксируются в самом ZCode, /model)")
+    p.add_argument("--model", help="модель для агента (иначе модель по умолчанию CLI; "
+                                   "для zcode не поддерживается)")
     p.add_argument("--notes", help="заметка к прогону")
     p.add_argument("--timeout-min", type=int,
                    help="лимит агента в минутах (иначе time_limit_min задачи)")
@@ -61,7 +65,7 @@ def main():
     elif a.cmd == "run_cli":
         core.run_cli_task(a.task_id, model=a.model, notes=a.notes,
                           timeout_min=a.timeout_min, force=a.force,
-                          record=not a.no_record)
+                          record=not a.no_record, agent=a.agent)
     elif a.cmd == "verify":
         core.verify_task(a.task_id, a.workspace, a.notes, a.model,
                          record=not a.no_record)

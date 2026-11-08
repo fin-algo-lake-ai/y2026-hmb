@@ -41,14 +41,22 @@ python -m hmb_runner verify <task-id>      # проверит свежайший
 # Зафиксировать токены перед стартом, подготовить таймер
 # Запустить (вместе с таймером), дождаться завершения
 
-python -m hmb_runner run_cli <task-id> [--model <model>] [--timeout-min N]
+python -m hmb_runner run_cli <task-id> [--agent claude|zcode] [--model <model>] [--timeout-min N]
 ```
 
-Разворачивает чистый workspace и запускает в нём `claude -p` с промптом задачи
-(`--output-format stream-json --verbose --dangerously-skip-permissions`,
-автообновление отключено). По завершении (или по таймауту `time_limit_min`
-задачи, или `--timeout-min`) сам запускает verifier и пишет результат в журнал
-(`mode: "cli"`).
+Разворачивает чистый workspace и запускает в нём headless-агента с промптом
+задачи. По завершении (или по таймауту `time_limit_min` задачи, или
+`--timeout-min`) сам запускает verifier и пишет результат в журнал
+(`mode: "cli"`, агент — в поле `agent` метаданных workspace).
+
+- `--agent claude` (по умолчанию): `claude -p --output-format stream-json
+  --verbose --dangerously-skip-permissions`, автообновление отключено.
+- `--agent zcode`: `zcode -p "<промпт>" --output-format stream-json --verbose`
+  (Z.ai GLM; права не запрашиваются — для `-p` действует режим yolo).
+  Флага `--model` у headless zcode нет: модель и effort задаются в самом
+  ZCode (`/model`, `/effort`) и вместе с версией zcode фиксируются в
+  метаданных прогона; фактическая модель каждого прогона берётся из лога
+  сессии (`turn.started → modelSelection`).
 
 > **WARNING**: с `--dangerously-skip-permissions` подтверждения не запрашиваются —
 > shell-команды и запись файлов выполняются свободно. Runner печатает это

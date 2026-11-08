@@ -7,6 +7,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,27 @@ RUN_META_FILE = ".hmb-run.json"     # метаданные прогона вну
 CLI_SESSION_FILE = ".hmb-session.jsonl"  # stream-json лог сессии CLI (артефакт)
 WS_TS_FORMAT = "%Y%m%dT%H%M%S"  # в имени workspace: без двоеточий, сортируется как время
 WS_NAME_RE = re.compile(r"^(\d{8}T\d{6})-(.+)$")
+ZCODE_PROVIDER_CONFIG = Path.home() / ".zcode" / "v2" / "provider_config.json"
+ZCODE_CJS = (Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+             / "Programs" / "ZCode" / "resources" / "glm" / "zcode.cjs")
+
+
+def zcode_default_model():
+    """Модель по умолчанию ZCode — из его конфига (задаётся в GUI/TUI, /model).
+
+    У headless `zcode -p` флага --model нет, модель фиксируется в конфиге.
+    Возвращает "providerId/modelId (effort X)" или None, если не задана.
+    """
+    try:
+        cfg = json.loads(ZCODE_PROVIDER_CONFIG.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    sel = (cfg.get("config") or {}).get("defaultModelSelection") or {}
+    if not sel.get("modelId"):
+        return None
+    out = f"{sel.get('providerId', '?')}/{sel['modelId']}"
+    lvl = (sel.get("options") or {}).get("reasoningLevel")
+    return f"{out} (effort {lvl})" if lvl else out
 
 
 def die(msg, code=1):
@@ -88,20 +110,27 @@ def _run(cmdline, timeout=20):
 
 
 def snapshot_versions():
-    """Снимок версий: расширение / VSCode / CLI / python."""
+    """Снимок версий: расширение / VSCode / CLI (claude, zcode) / python."""
     ext_ver = None
     for ln in _run(["code", "--list-extensions", "--show-versions"]) or []:
         if ln.lower().startswith(EXTENSION_ID.lower() + "@"):
             ext_ver = ln.split("@", 1)[1].strip()
     vlines = _run(["code", "--version"])
     claude = _run(["claude", "--version"])
-    return {
+    versions = {
         "captured_utc": now_utc(),
         "extension": ext_ver or "not found",
         "vscode": vlines[0] if vlines else "not found",
         "cli": claude[0] if claude else "not found",
         "python": sys.version.split()[0],
     }
+    zc = _run(["zcode", "version"])
+    if zc:
+        versions["zcode_cli"] = zc[0]
+        zm = zcode_default_model()
+        if zm:
+            versions["zcode_model"] = zm
+    return versions
 
 
 def _fresh_workspace(ws, task_dir):
@@ -172,11 +201,15 @@ def _parse_session(path):
     """Читает stream-json лог сессии CLI; возвращает metrics из финального
     события type="result" (последнего в логе; {} если его нет).
 
+    Два формата: claude (assistant/user/result с snake_case-полями) и zcode
+    (model.streaming/tool.updated/turn.*; финальный result с usage, где есть
+    modelRequestCount; модель/длительность — из turn.started/turn.completed).
     terminal_reason берётся как есть (причина завершения, если CLI её отдал).
     """
     metrics = {}
     if not path.exists():
         return metrics
+    zc = {}  # накопитель zcode: модель/длительность/статус из turn.*
     for ln in path.read_text(encoding="utf-8", errors="replace").splitlines():
         ln = ln.strip()
         if not ln:
@@ -185,41 +218,103 @@ def _parse_session(path):
             obj = json.loads(ln)
         except ValueError:
             continue
-        if not (isinstance(obj, dict) and obj.get("type") == "result"):
+        if not isinstance(obj, dict):
             continue
-        dur = obj.get("duration_ms")
-        api = obj.get("duration_api_ms")
-        metrics = {
-            "session_id": obj.get("session_id"),
-            "subtype": obj.get("subtype"),
-            "is_error": obj.get("is_error"),
-            "num_turns": obj.get("num_turns"),
-            "duration_sec": round(dur / 1000, 1) if dur is not None else None,
-            "api_sec": round(api / 1000, 1) if api is not None else None,
-            "cost_usd": obj.get("total_cost_usd"),
-            "usage": obj.get("usage"),
-            "terminal_reason": obj.get("terminal_reason"),
-            "result_excerpt": (obj.get("result") or "").strip()[:300] or None,
-        }
+        t = obj.get("type")
+        if t == "turn.started":
+            sel = ((obj.get("payload") or {}).get("intent") or {}).get("modelSelection") or {}
+            if sel.get("modelId"):
+                m = "%s/%s" % (sel.get("providerId", "?"), sel["modelId"])
+                lvl = (sel.get("options") or {}).get("reasoningLevel")
+                if lvl:
+                    m += " (effort %s)" % lvl
+                zc["model"] = m
+        elif t == "turn.completed":
+            p = obj.get("payload") or {}
+            zc.update(duration_ms=p.get("duration"),
+                      num_turns=p.get("historyRoundCount"),
+                      terminal_reason=p.get("resultType"),
+                      is_error=p.get("resultType") not in (None, "success"))
+        elif t == "result":
+            u = obj.get("usage") or {}
+            if "modelRequestCount" in u:  # zcode
+                zc.setdefault("num_turns", u.get("modelRequestCount"))
+                dur = zc.get("duration_ms")
+                metrics = {
+                    "session_id": obj.get("sessionId"),
+                    "subtype": None,
+                    "is_error": zc.get("is_error"),
+                    "num_turns": zc.get("num_turns"),
+                    "duration_sec": round(dur / 1000, 1) if dur is not None else None,
+                    "api_sec": None,
+                    "cost_usd": None,
+                    "usage": {
+                        "input_tokens": u.get("inputTokens"),
+                        "output_tokens": u.get("outputTokens", None) or None,
+                        "cache_read_input_tokens": u.get("cacheReadTokens"),
+                        "cache_creation_input_tokens": u.get("cacheWriteTokens"),
+                    },
+                    "terminal_reason": zc.get("terminal_reason"),
+                    "model": zc.get("model"),
+                    "result_excerpt": (obj.get("response") or "").strip()[:300] or None,
+                }
+                continue
+            # claude
+            dur = obj.get("duration_ms")
+            api = obj.get("duration_api_ms")
+            metrics = {
+                "session_id": obj.get("session_id"),
+                "subtype": obj.get("subtype"),
+                "is_error": obj.get("is_error"),
+                "num_turns": obj.get("num_turns"),
+                "duration_sec": round(dur / 1000, 1) if dur is not None else None,
+                "api_sec": round(api / 1000, 1) if api is not None else None,
+                "cost_usd": obj.get("total_cost_usd"),
+                "usage": obj.get("usage"),
+                "terminal_reason": obj.get("terminal_reason"),
+                "result_excerpt": (obj.get("result") or "").strip()[:300] or None,
+            }
     return metrics
 
 
-def run_cli_agent(cfg, ws, model=None, timeout_min=None):
-    """Headless-прогон агента: `claude -p` внутри workspace (вариант run_cli).
+def run_cli_agent(cfg, ws, model=None, timeout_min=None, agent="claude"):
+    """Headless-прогон агента внутри workspace (вариант run_cli).
 
+    agent: "claude" — `claude -p`, промпт через stdin, права не запрашиваются
+    (--dangerously-skip-permissions); "zcode" — `zcode -p "<промпт>"`, промпт
+    аргументом, --mode yolo (дефолт для -p), флага --model нет — модель из
+    конфига ZCode, фактическая попадает в лог (turn.started → modelSelection).
     Полный stream-json лог пишется в <ws>/.hmb-session.jsonl (артефакт прогона).
-    Разрешения не запрашиваются (--dangerously-skip-permissions) — вызывающий
-    код обязан до этого показать WARNING (см. run_cli_task).
+    Разрешения не запрашиваются ни в одном варианте — вызывающий код обязан до
+    этого показать WARNING (см. run_cli_task).
     Возвращает (metrics, timed_out).
     """
-    exe = shutil.which("claude")
-    if not exe:
-        die("CLI не найден: claude (проверь `python -m hmb_runner snapshot`)")
-    cmdline = [exe, "-p",
-               "--output-format", "stream-json", "--verbose",
-               "--dangerously-skip-permissions"]
-    if model:
-        cmdline += ["--model", model]
+    if agent == "zcode":
+        prompt = (ws / "_prompt.txt").read_text(encoding="utf-8")
+        # node + zcode.cjs напрямую: через zcode.CMD многострочный промпт
+        # проходит cmd.exe и ломает разбор аргументов (теряются флаги)
+        node = shutil.which("node")
+        if node and ZCODE_CJS.exists():
+            base = [node, str(ZCODE_CJS)]
+        else:
+            exe = shutil.which("zcode")
+            if not exe:
+                die("не найдены ни node+ZCODE_CJS, ни zcode в PATH "
+                    "(проверь `python -m hmb_runner snapshot`)")
+            base = [exe]
+        cmdline = base + ["-p", prompt,
+                          "--output-format", "stream-json", "--verbose"]
+        stdin_src = subprocess.DEVNULL
+    else:
+        exe = shutil.which("claude")
+        if not exe:
+            die("CLI не найден: claude (проверь `python -m hmb_runner snapshot`)")
+        cmdline = [exe, "-p",
+                   "--output-format", "stream-json", "--verbose",
+                   "--dangerously-skip-permissions"]
+        if model:
+            cmdline += ["--model", model]
+        stdin_src = None  # промпт уходит через stdin (fin ниже)
     limit_min = timeout_min or cfg.get("time_limit_min") or 30
     env = os.environ.copy()
     env["DISABLE_AUTOUPDATER"] = "1"  # фиксация версии CLI на время прогона
@@ -229,13 +324,16 @@ def run_cli_agent(cfg, ws, model=None, timeout_min=None):
          open(ws / CLI_SESSION_FILE, "w", encoding="utf-8") as flog:
         print(f"агент работает (лимит {limit_min} мин), лог: {ws / CLI_SESSION_FILE}")
         sys.stdout.flush()
+        t0 = time.monotonic()
         try:
-            r = subprocess.run(cmdline, cwd=str(ws), stdin=fin, stdout=flog,
+            r = subprocess.run(cmdline, cwd=str(ws),
+                               stdin=stdin_src or fin, stdout=flog,
                                stderr=subprocess.PIPE, timeout=limit_min * 60)
         except subprocess.TimeoutExpired as e:
             r, timed_out, stderr_b = e, True, e.stderr or b""
         else:
             stderr_b = r.stderr or b""
+    wall_sec = time.monotonic() - t0
     if timed_out:
         print(f"ТАЙМАУТ: агент не уложился в {limit_min} мин — процесс остановлен, "
               f"лог сессии сохранён, прогон помечен timed_out")
@@ -244,13 +342,15 @@ def run_cli_agent(cfg, ws, model=None, timeout_min=None):
         print("stderr CLI (хвост):")
         print("\n".join(err.splitlines()[-10:]))
     metrics = _parse_session(ws / CLI_SESSION_FILE)
+    if metrics.get("duration_sec") is None:  # zcode длительность иногда не отдаёт
+        metrics["duration_sec"] = round(wall_sec, 1)
     if timed_out:
         metrics["timed_out"] = True
     return metrics, timed_out
 
 
 def run_cli_task(task_id, model=None, notes=None, timeout_min=None,
-                 force=False, record=True):
+                 force=False, record=True, agent="claude"):
     """Автоматический прогон: workspace + headless-агент + verifier + журнал."""
     task_dir, cfg = find_task(task_id)
     ws = workspace_dir(task_id)
@@ -259,8 +359,14 @@ def run_cli_task(task_id, model=None, notes=None, timeout_min=None,
             "  (для пересоздания — `run_cli --force`)")
     _fresh_workspace(ws, task_dir)
     versions = snapshot_versions()
+    if agent == "zcode":
+        if model:
+            die("у headless `zcode -p` нет флага --model: модель (и effort) задаётся "
+                f"в самом ZCode (/model, /effort); сейчас там: "
+                f"{zcode_default_model() or 'не задана'}")
+        # фактическая модель будет взята из лога сессии после прогона
     meta = {"task_id": task_id, "started_utc": now_utc(), "host": host_name(),
-            "versions": versions, "model": model, "mode": "cli"}
+            "versions": versions, "model": model, "mode": "cli", "agent": agent}
     (ws / RUN_META_FILE).write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     prompt = (cfg.get("prompt") or "").rstrip() + "\n"
@@ -269,10 +375,16 @@ def run_cli_task(task_id, model=None, notes=None, timeout_min=None,
     print(f"workspace : {ws}")
     print(f"задача    : {task_id} [{cfg.get('category')} / {cfg.get('difficulty')}, "
           f"лимит {cfg.get('time_limit_min')} мин]")
+    print(f"агент     : {agent}")
     print(f"версии    : cli {versions['cli']} | python {versions['python']}"
+          + (f" | zcode {versions.get('zcode_cli')}" if agent == "zcode" else "")
           + (f" | модель {model}" if model else ""))
     print("=" * 70)
-    print("WARNING: агент запускается с --dangerously-skip-permissions.")
+    if agent == "claude":
+        print("WARNING: агент запускается с --dangerously-skip-permissions.")
+    else:
+        print("WARNING: агент zcode работает в режиме yolo (дефолт для -p),")
+        print("  подтверждения тоже не запрашиваются.")
     print("  Подтверждения не запрашиваются: shell-команды, запись и удаление")
     print("  файлов выполняются свободно, ограничение — только таймаут задачи.")
     print("  Рекомендуется изоляция (контейнер/VM); workspace:", ws)
@@ -280,12 +392,13 @@ def run_cli_task(task_id, model=None, notes=None, timeout_min=None,
     print()
 
     metrics, timed_out = run_cli_agent(cfg, ws, model=model,
-                                       timeout_min=timeout_min)
+                                       timeout_min=timeout_min, agent=agent)
     print()
     if metrics.get("num_turns") is not None:
         print(f"агент: {metrics['num_turns']} шагов, "
               f"{metrics.get('duration_sec')} с, "
               f"terminal_reason={metrics.get('terminal_reason')}")
+    model = model or metrics.get("model")  # zcode: модель из лога сессии
     return verify_task(task_id, workspace=str(ws), notes=notes, model=model,
                        record=record, metrics=metrics)
 
